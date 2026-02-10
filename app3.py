@@ -309,7 +309,13 @@ except Exception as e:
     st.stop()
 
 cols_map = infer_columns(df)
-date_col   = cols_map["date"]
+
+# --- Correctif : forcer l'usage de "Date operation" si elle existe
+if "Date operation" in df.columns:
+    date_col = "Date operation"
+else:
+    date_col = cols_map["date"]
+
 label_col  = cols_map["label"]
 debit_col  = cols_map["debit"]
 credit_col = cols_map["credit"]
@@ -329,10 +335,17 @@ if missing:
     st.stop()
 
 df = df.copy()
-df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)  # -> naïf
+# Convertit explicitement Date operation si présente
+if "Date operation" in df.columns:
+    df["Date operation"] = pd.to_datetime(df["Date operation"], errors="coerce", dayfirst=True)
+# Fallback : convertit la colonne date_col si autre
+df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+
 df = df[~df[date_col].isna()]
 df["amount_signed"] = coerce_amounts(df, amount_col, debit_col, credit_col)
 df[label_col] = df[label_col].astype(str)
+
+# --- Correctif : mois basé sur Date operation (ou date_col forcée)
 df["mois"] = extract_month_period(df[date_col])
 mois_detectes = np.sort(df["mois"].dropna().unique())
 
@@ -358,7 +371,7 @@ with st.expander("⚙️ Ajuster les règles de détection (regex avancées)", e
     pattern_fuel = st.text_input("Regex Carburant", value=DEFAULT_PATTERN_CARBURANT, key="pat_fuel")
     pattern_cash = st.text_input("Regex Retraits / Espèces (DAB/ATM)", value=DEFAULT_PATTERN_CASH, key="pat_cash")
 
-# Stats historiques
+# Stats historiques (basées sur la même colonne date_col)
 prev_month = mois_choisi - 1
 prev_3_months = [mois_choisi - i for i in (1, 2, 3)]
 df_prev_month = df[df["mois"] == prev_month].copy()
@@ -677,15 +690,18 @@ else:
     var_fuel_def = round(fuel_curr, 2)
     var_cash_def = round(cash_curr, 2)
 
+# --- Correctif A : forcer la réinitialisation des inputs selon le mode
+mode_suffix = "_3m" if use_3m else "_obs"
+
 # Expander détail des 4 postes
 with st.expander("Détail des variables (modifiable)", expanded=False):
     cva1, cva2, cva3, cva4 = st.columns(4)
-    var_alim = cva1.number_input("Alimentaire (€)",        min_value=0.0, step=5.0, value=var_alim_def, key="var_alim_in")
-    var_anim = cva2.number_input("Animaux (€)",            min_value=0.0, step=5.0, value=var_anim_def, key="var_anim_in")
-    var_fuel = cva3.number_input("Carburant (€)",          min_value=0.0, step=5.0, value=var_fuel_def, key="var_fuel_in")
-    var_cash = cva4.number_input("Retraits/espèces (€)",   min_value=0.0, step=5.0, value=var_cash_def, key="var_cash_in")
+    var_alim = cva1.number_input("Alimentaire (€)",      min_value=0.0, step=5.0, value=var_alim_def, key="var_alim_in"+mode_suffix)
+    var_anim = cva2.number_input("Animaux (€)",          min_value=0.0, step=5.0, value=var_anim_def, key="var_anim_in"+mode_suffix)
+    var_fuel = cva3.number_input("Carburant (€)",        min_value=0.0, step=5.0, value=var_fuel_def, key="var_fuel_in"+mode_suffix)
+    var_cash = cva4.number_input("Retraits/espèces (€)", min_value=0.0, step=5.0, value=var_cash_def, key="var_cash_in"+mode_suffix)
 
-# Total visible (hors marge)
+# Total visible (hors marge) — calculé sur les variables locales
 var_total = float(var_alim + var_anim + var_fuel + var_cash)
 
 c_var_total, c_var_buf = st.columns([1,1])
