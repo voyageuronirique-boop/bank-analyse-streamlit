@@ -85,11 +85,10 @@ DEFAULT_PATTERN_CASH = (
     r"\bcash\b)"
 )
 
-# --- Participations récurrentes — règles fixes ---
+# --- Participations récurrentes — règles fixes (Vanessa / Jérémy)
 PAT_VANESSA = re.compile(r"\bvanessa\b|participation.*vanessa", re.IGNORECASE)
 PAT_JEREMY  = re.compile(r"\bjeremy\b|participation.*jeremy",   re.IGNORECASE)
 
-# Règles : montants + fenêtres de jours (start/end inclusifs)
 PARTICIPATIONS_RULES = [
     {"label": "Participation Vanessa",  "person": "Vanessa", "amount": 1150.0, "day_start": 26, "day_end": 30},
     {"label": "Participation Jeremy",   "person": "Jeremy",  "amount": 1070.0, "day_start": 3,  "day_end": 3},
@@ -288,8 +287,7 @@ def clamp_date_for_month(year: int, month: int, day: int) -> pd.Timestamp:
     return pd.Timestamp(year=year, month=month, day=safe_day)
 
 def plan_participation_date(year: int, month: int, day_start: int, day_end: int) -> pd.Timestamp:
-    """Choisit le jour prévu ce mois : prend le milieu de la fenêtre (ou le seul jour si start=end),
-    puis 'clamp' au dernier jour du mois (gère les mois courts)."""
+    """Jour prévu = milieu de la fenêtre (ou unique jour), clampé au dernier jour du mois."""
     target_day = int(round((day_start + day_end) / 2))
     return clamp_date_for_month(year, month, target_day)
 
@@ -351,7 +349,7 @@ else:
 df_month = df[df["mois"] == mois_choisi].copy()
 
 # Info solde initial
-st.info("Par défaut, **solde initial au 1er du mois = 0,00 €** (modifiable plus bas).")
+st.info("Par défaut, **solde initial au 1er du mois = 0,00 €** (modifiable plus bas).")
 
 # Étape 3 — Règles/Regex (expander)
 with st.expander("⚙️ Ajuster les règles de détection (regex avancées)", expanded=False):
@@ -419,7 +417,7 @@ updated_costs = detected_by_provider.copy()
 
 if want_update:
     st.subheader("Étape 4 — Modification guidée des coûts mensuels")
-    st.caption("Pour chaque contrat : **passée = réel à date** / **attendue = référence mensuelle** (historique médian ou valeur saisie).")
+    st.caption("Pour chaque contrat : passée = réel à date / attendue = référence mensuelle (historique médian ou valeur saisie).")
     contrats = sorted(list(provider_patterns.keys()), key=lambda c: (-detected_by_provider.get(c, 0.0), c.lower()))
     for k in contrats:
         passed = float(detected_by_provider.get(k, 0.0))
@@ -750,7 +748,7 @@ real_daily = pd.DataFrame({"date": dates_all_to_cutoff}).merge(events_real, on="
 real_daily["balance"] = solde_initial + real_daily["amount"].cumsum()
 
 # =========================
-# 🔵 Série projetée : fournisseurs restants + participations anticipées + autres revenus datés + CSV futurs + variables
+# Série projetée : fournisseurs restants + participations anticipées + autres revenus datés + CSV futurs + variables
 # =========================
 proj_events = []
 
@@ -801,7 +799,7 @@ for part in st.session_state["participations_rows"]:
 
     proj_events.append({"date": planned_date.normalize(), "amount": float(amount)})
 
-# C) Revenus **datés dans le CSV** (après cutoff)
+# C) Revenus datés dans le CSV (après cutoff)
 incomes_future_csv = df_month[(df_month["amount_signed"] > 0) & (df_month[date_col] > cutoff_date)]
 if not incomes_future_csv.empty:
     inc_by_date = incomes_future_csv.groupby(incomes_future_csv[date_col].dt.normalize())["amount_signed"].sum().reset_index()
@@ -904,4 +902,3 @@ with st.expander("Exports", expanded=False):
         file_name=f"projection_{mois_choisi}.json",
         mime="application/json"
     )
-``
