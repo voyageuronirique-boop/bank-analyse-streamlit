@@ -37,12 +37,7 @@ st.markdown(HIDE_SIDEBAR_CSS, unsafe_allow_html=True)
 # ----- CONSTANTES --------
 # =========================
 
-DEFAULT_RECURRING_CREDITS = [
-    {"label": "Participation Jeremy",   "amount": 1150.0},
-    {"label": "Participation Vanessa",  "amount": 1050.0},
-    {"label": "Participation Jeremy 2", "amount": 530.0},
-]
-
+# --- Fournisseurs connus (échantillon) ---
 DEFAULT_PROVIDER_PATTERNS = [
     {"Label": "Crédit immobilier", "Regex": r"(echeance.*pret|pret|credit|hypothec|immobilier|echeance\s*de\s*credit)"},
     {"Label": "Assurance habitation / BPCE", "Regex": r"(bpce\s+assurances?|multirisque|habitation)"},
@@ -59,6 +54,7 @@ DEFAULT_PROVIDER_PATTERNS = [
     {"Label": "Frais bancaires", "Regex": r"(cotis(ations)?\s+bancaires|frais\s+bancaires)"},
 ]
 
+# --- Catégorisation variables ---
 DEFAULT_PATTERN_ALIM = (
     r"(carrefour|leclerc|e\.?leclerc|intermarch[eé]|super\s*u|u\s?express|u drive|systeme\s?u|"
     r"auchan|lidl|aldi|monoprix|picard|grand\s*frais|biocoop|spar|casino|geant|franprix|"
@@ -88,6 +84,17 @@ DEFAULT_PATTERN_CASH = (
     r"retrait\s*especes|retrait\s*esp[eè]ces|"
     r"\bcash\b)"
 )
+
+# --- Participations récurrentes — règles fixes ---
+PAT_VANESSA = re.compile(r"\bvanessa\b|participation.*vanessa", re.IGNORECASE)
+PAT_JEREMY  = re.compile(r"\bjeremy\b|participation.*jeremy",   re.IGNORECASE)
+
+# Règles : montants + fenêtres de jours (start/end inclusifs)
+PARTICIPATIONS_RULES = [
+    {"label": "Participation Vanessa",  "person": "Vanessa", "amount": 1150.0, "day_start": 26, "day_end": 30},
+    {"label": "Participation Jeremy",   "person": "Jeremy",  "amount": 1070.0, "day_start": 3,  "day_end": 3},
+    {"label": "Participation Jeremy 2", "person": "Jeremy",  "amount":  530.0, "day_start": 3,  "day_end": 3},
+]
 
 # =========================
 # ----- UTILITAIRES -------
@@ -221,7 +228,6 @@ def detect_recurring(df: pd.DataFrame, label_col: str, min_months: int = 3) -> p
     res = res.sort_values(["mois_count", "operations"], ascending=[False, False])
     return res[res["mois_count"] >= min_months]
 
-# --- Fournisseurs/contrats récurrents ---
 def match_provider(label: str, provider_patterns: Dict[str, str]) -> List[str]:
     """Retourne la liste des catégories 'provider' détectées dans le libellé."""
     hits: List[str] = []
@@ -276,102 +282,16 @@ def is_upcoming_empty_or_zero(dfu: pd.DataFrame) -> bool:
     except Exception:
         return True
 
-# =========================
-# --- DÉTECTION PARTICIPATIONS (INCOMES RÉCURRENTS) ---
-# =========================
-
-PAT_VANESSA = re.compile(r"\bvanessa\b|participation.*vanessa", re.IGNORECASE)
-PAT_JEREMY  = re.compile(r"\bjeremy\b|participation.*jeremy",   re.IGNORECASE)
-
-def detect_participations(
-    df_all: pd.DataFrame,
-    date_col: str,
-    label_col: str,
-    months_back: int = 12,
-    min_months: int = 3
-) -> List[Dict]:
-    """
-    Retourne une liste d'entrées de participations [{'label','person','amount','day'}] détectées
-    à partir des opérations POSITIVES récurrentes.
-    """
-    out: List[Dict] = []
-    if df_all.empty:
-        return out
-
-    # Positifs uniquement
-    pos = df_all[df_all["amount_signed"] > 0].copy()
-    if pos.empty:
-        return out
-
-    # Fenêtre historique (jusqu'à N mois avant le dernier mois présent)
-    periods_sorted = np.sort(df_all["mois"].dropna().unique())
-    last_p = periods_sorted[-1]
-    hist_months = [last_p - i for i in range(0, min(months_back, len(periods_sorted)))]
-    pos = pos[pos["mois"].isin(hist_months)].copy()
-    if pos.empty:
-        return out
-
-    # Normalisation libellés
-    pos["label_norm"] = pos[label_col].fillna("").map(normalize_str).str.lower()
-    pos["person"] = pos["label_norm"].apply(
-        lambda s: "Vanessa" if PAT_VANESSA.search(s) else ("Jeremy" if PAT_JEREMY.search(s) else None)
-    )
-
-    # Regroupe par libellé normalisé
-    agg = pos.groupby(["label_norm"], as_index=False).agg(
-        amount_median=("amount_signed", "median"),
-        months_count=("mois", "nunique"),
-        ops_count=("amount_signed", "size"),
-        day_median=(date_col, lambda s: int(pd.Series(pd.to_datetime(s).dt.day).median())),
-        any_label=(label_col, "first")
-    )
-    # Garde récurrents
-    agg = agg[agg["months_count"] >= min_months].copy()
-
-    # Sépare par personne si reconnue
-    agg["person"] = agg["label_norm"].apply(
-        lambda s: "Vanessa" if PAT_VANESSA.search(s) else ("Jeremy" if PAT_JEREMY.search(s) else None)
-    )
-
-    # VANESSA — on prend le cluster le plus récurrent (puis plus d'opérations), sinon défaut 1150
-    vanessa_rows = agg[agg["person"] == "Vanessa"].sort_values(["months_count", "ops_count", "amount_median"], ascending=[False, False, False])
-    if not vanessa_rows.empty:
-        vr = vanessa_rows.iloc[0]
-        out.append({
-            "label": "Participation Vanessa",
-            "person": "Vanessa",
-            "amount": float(round(vr["amount_median"], 2)),
-            "day": int(vr["day_median"])
-        })
-    else:
-        out.append({
-            "label": "Participation Vanessa",
-            "person": "Vanessa",
-            "amount": 1150.0,   # défaut demandé
-            "day": 30           # jour par défaut, sera clampé au dernier jour du mois
-        })
-
-    # JEREMY — on prend jusqu’à 2 clusters (les plus récurrents), sinon défauts 1070 et 530
-    jer_rows = agg[agg["person"] == "Jeremy"].sort_values(["months_count", "ops_count", "amount_median"], ascending=[False, False, False])
-    if len(jer_rows) >= 2:
-        jr1 = jer_rows.iloc[0]
-        jr2 = jer_rows.iloc[1]
-        out.append({"label": "Participation Jeremy",   "person": "Jeremy", "amount": float(round(jr1["amount_median"], 2)), "day": int(jr1["day_median"])})
-        out.append({"label": "Participation Jeremy 2", "person": "Jeremy", "amount": float(round(jr2["amount_median"], 2)), "day": int(jr2["day_median"])})
-    elif len(jer_rows) == 1:
-        jr1 = jer_rows.iloc[0]
-        out.append({"label": "Participation Jeremy",   "person": "Jeremy", "amount": float(round(jr1["amount_median"], 2)), "day": int(jr1["day_median"])})
-        out.append({"label": "Participation Jeremy 2", "person": "Jeremy", "amount": 530.0, "day": 30})
-    else:
-        out.append({"label": "Participation Jeremy",   "person": "Jeremy", "amount": 1070.0, "day": 30})
-        out.append({"label": "Participation Jeremy 2", "person": "Jeremy", "amount": 530.0,  "day": 30})
-
-    return out
-
 def clamp_date_for_month(year: int, month: int, day: int) -> pd.Timestamp:
     last = pd.Period(f"{year}-{month:02d}").asfreq("M").end_time.normalize()
     safe_day = max(1, min(int(day), int(last.day)))
     return pd.Timestamp(year=year, month=month, day=safe_day)
+
+def plan_participation_date(year: int, month: int, day_start: int, day_end: int) -> pd.Timestamp:
+    """Choisit le jour prévu ce mois : prend le milieu de la fenêtre (ou le seul jour si start=end),
+    puis 'clamp' au dernier jour du mois (gère les mois courts)."""
+    target_day = int(round((day_start + day_end) / 2))
+    return clamp_date_for_month(year, month, target_day)
 
 # =========================
 # ------ APPLICATION -------
@@ -680,14 +600,12 @@ charges_df = fixed_status_df[["Contrat", "Prévu mois (€)"]].rename(columns={"
 total_charges = float(charges_df["Montant (€/mois)"].sum())
 
 # =========================
-# PARTICIPATIONS — auto-détection + total visible + expander détail
+# PARTICIPATIONS — règles fixes + total visible + expander détail
 # =========================
 
-# Initialise depuis détection (une seule fois par période)
-session_period_key = f"participations_period_{str(mois_choisi)}"
+# Initialise une seule fois par période/mois
 if ("participations_rows" not in st.session_state) or (st.session_state.get("participations_period") != str(mois_choisi)):
-    detected_parts = detect_participations(df, date_col, label_col, months_back=12, min_months=3)
-    st.session_state["participations_rows"] = detected_parts
+    st.session_state["participations_rows"] = [dict(r) for r in PARTICIPATIONS_RULES]
     st.session_state["participations_period"] = str(mois_choisi)
 
 # Total visible
@@ -696,35 +614,41 @@ sum_fixed_credits = float(sum(row.get("amount", 0.0) for row in st.session_state
 st.subheader("Participations (revenus fixes)")
 c_part_tot, c_part_other = st.columns([1,1])
 with c_part_tot:
-    st.metric("Participations — total détecté", currency(sum_fixed_credits))
+    st.metric("Participations — total (règles fixes)", currency(sum_fixed_credits))
 
 # Détail (éditable)
-with st.expander("Détail des participations (auto-détectées, modifiables)", expanded=False):
+with st.expander("Détail des participations (éditables)", expanded=False):
     cols = st.columns(3)
     edited_rows = []
     for i, row in enumerate(st.session_state["participations_rows"]):
         with cols[i % 3]:
-            lbl = st.text_input(f"Libellé participation #{i+1}", value=row.get("label", ""), key=f"p_lbl_{i}")
-            amt = st.number_input(f"Montant #{i+1} (€)", min_value=0.0, step=10.0, value=float(row.get("amount", 0.0)), key=f"p_amt_{i}")
-            day = st.number_input(f"Jour habituel #{i+1}", min_value=1, max_value=31, step=1, value=int(row.get("day", 30)), key=f"p_day_{i}")
+            lbl  = st.text_input(f"Libellé participation #{i+1}", value=row.get("label", ""), key=f"p_lbl_{i}")
+            amt  = st.number_input(f"Montant #{i+1} (€)", min_value=0.0, step=10.0, value=float(row.get("amount", 0.0)), key=f"p_amt_{i}")
+            d_s  = st.number_input(f"Jour début #{i+1}", min_value=1, max_value=31, step=1, value=int(row.get("day_start", 28)), key=f"p_dstart_{i}")
+            d_e  = st.number_input(f"Jour fin #{i+1}",   min_value=1, max_value=31, step=1, value=int(row.get("day_end",   28)), key=f"p_dend_{i}")
             person = row.get("person", "")
-            edited_rows.append({"label": lbl, "amount": float(amt), "day": int(day), "person": person})
+            edited_rows.append({"label": lbl, "amount": float(amt), "day_start": int(d_s), "day_end": int(d_e), "person": person})
 
-    col_add1, col_add2, col_add3 = st.columns([2,1,1])
+    col_add1, col_add2, col_add3, col_add4 = st.columns([2,1,1,1])
     with col_add1:
         new_lbl = st.text_input("Libellé (nouvelle participation)", key="new_part_lbl")
     with col_add2:
         new_amt = st.number_input("Montant (€)", min_value=0.0, step=10.0, value=0.0, key="new_part_amt")
     with col_add3:
-        new_day = st.number_input("Jour", min_value=1, max_value=31, step=1, value=30, key="new_part_day")
+        new_day_start = st.number_input("Jour début", min_value=1, max_value=31, step=1, value=28, key="new_part_day_start")
+    with col_add4:
+        new_day_end   = st.number_input("Jour fin",   min_value=1, max_value=31, step=1, value=28, key="new_part_day_end")
 
-    bcols = st.columns(2)
-    with bcols[0]:
+    b1, b2 = st.columns(2)
+    with b1:
         if st.button("Ajouter la participation"):
             if new_lbl and new_amt > 0:
-                st.session_state["participations_rows"].append({"label": new_lbl, "amount": float(new_amt), "day": int(new_day), "person": ""})
+                st.session_state["participations_rows"].append({
+                    "label": new_lbl, "amount": float(new_amt),
+                    "day_start": int(new_day_start), "day_end": int(new_day_end),
+                    "person": ""})
                 st.rerun()
-    with bcols[1]:
+    with b2:
         if st.button("Appliquer les modifications"):
             st.session_state["participations_rows"] = edited_rows
             st.rerun()
@@ -758,18 +682,13 @@ else:
 # Expander détail des 4 postes
 with st.expander("Détail des variables (modifiable)", expanded=False):
     cva1, cva2, cva3, cva4 = st.columns(4)
-    var_alim = cva1.number_input("Alimentaire (€)", min_value=0.0, step=5.0, value=var_alim_def, key="var_alim_in")
-    var_anim = cva2.number_input("Animaux (€)",     min_value=0.0, step=5.0, value=var_anim_def, key="var_anim_in")
-    var_fuel = cva3.number_input("Carburant (€)",   min_value=0.0, step=5.0, value=var_fuel_def, key="var_fuel_in")
-    var_cash = cva4.number_input("Retraits/espèces (€)", min_value=0.0, step=5.0, value=var_cash_def, key="var_cash_in")
+    var_alim = cva1.number_input("Alimentaire (€)",        min_value=0.0, step=5.0, value=var_alim_def, key="var_alim_in")
+    var_anim = cva2.number_input("Animaux (€)",            min_value=0.0, step=5.0, value=var_anim_def, key="var_anim_in")
+    var_fuel = cva3.number_input("Carburant (€)",          min_value=0.0, step=5.0, value=var_fuel_def, key="var_fuel_in")
+    var_cash = cva4.number_input("Retraits/espèces (€)",   min_value=0.0, step=5.0, value=var_cash_def, key="var_cash_in")
 
 # Total visible (hors marge)
-var_total = float(
-    st.session_state.get("var_alim_in", var_alim_def)
-    + st.session_state.get("var_anim_in", var_anim_def)
-    + st.session_state.get("var_fuel_in", var_fuel_def)
-    + st.session_state.get("var_cash_in", var_cash_def)
-)
+var_total = float(var_alim + var_anim + var_fuel + var_cash)
 
 c_var_total, c_var_buf = st.columns([1,1])
 with c_var_total:
@@ -845,8 +764,7 @@ for _, r in restants.iterrows():
         if d.date() > cutoff_date.date():
             proj_events.append({"date": d.normalize(), "amount": -float(r["Montant à venir (€)"])})
 
-# B) Participations anticipées (si non présentes dans le CSV après cutoff)
-# Vérifie s'il y a déjà des opérations positives correspondant à la personne (vanessa/jeremy) après cutoff
+# B) Participations anticipées (règles fixes) — évite doublon si déjà dans le CSV futur
 def has_future_income_for_person(df_m: pd.DataFrame, regex_person: re.Pattern, after_date: pd.Timestamp) -> bool:
     if df_m.empty:
         return False
@@ -861,22 +779,26 @@ has_future_vanessa = has_future_income_for_person(df_month, PAT_VANESSA, cutoff_
 has_future_jeremy  = has_future_income_for_person(df_month, PAT_JEREMY,  cutoff_date)
 
 for part in st.session_state["participations_rows"]:
-    label = part.get("label", "")
     amount = float(part.get("amount", 0.0) or 0.0)
-    day = int(part.get("day", 30))
+    d_s    = int(part.get("day_start", 28))
+    d_e    = int(part.get("day_end",   28))
     person = part.get("person", "")
     if amount <= 0:
         continue
-    # Date anticipée = min(jour, dernier jour du mois) -> gère février automatiquement
-    planned_date = clamp_date_for_month(last_day.year, last_day.month, day)
+
+    # Date prévue ce mois (milieu de la fenêtre) avec clamp sur fin de mois (gère février)
+    planned_date = plan_participation_date(last_day.year, last_day.month, d_s, d_e)
+
     # N'ajoute que si la date est dans le futur par rapport au cutoff
     if planned_date.date() <= cutoff_date.date():
         continue
-    # Évite doublon si déjà dans CSV futur pour la même personne
+
+    # Évite doublon si déjà présent après cutoff dans le CSV
     if person == "Vanessa" and has_future_vanessa:
         continue
     if person == "Jeremy"  and has_future_jeremy:
         continue
+
     proj_events.append({"date": planned_date.normalize(), "amount": float(amount)})
 
 # C) Revenus **datés dans le CSV** (après cutoff)
@@ -949,7 +871,13 @@ with st.expander("Exports", expanded=False):
     projection_payload = {
         "mois": str(mois_choisi),
         "participations": [
-            {"label": r["label"], "montant": float(r["amount"]), "jour": int(r["day"]), "personne": r.get("person", "")}
+            {
+                "label": r["label"],
+                "montant": float(r["amount"]),
+                "jour_debut": int(r["day_start"]),
+                "jour_fin": int(r["day_end"]),
+                "personne": r.get("person", "")
+            }
             for r in st.session_state["participations_rows"]
         ],
         "revenus_autres": other_incomes,
@@ -976,3 +904,4 @@ with st.expander("Exports", expanded=False):
         file_name=f"projection_{mois_choisi}.json",
         mime="application/json"
     )
+``
