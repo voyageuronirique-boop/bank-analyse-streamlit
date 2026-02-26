@@ -1,18 +1,26 @@
 # app.py
-# Analyse bancaire CSV — Workflow 7 étapes (Streamlit)
-# Auteur: Adapté pour Jeremy Verhelst (CSV ; latin-1)
-# Python 3.9+
+# Analyse bancaire CSV — Workflow complet (Streamlit)
+# - CSV FR/EN robuste (séparateurs/encodages)
+# - Catégorisation regex éditable + consolidation EDF/Sowee
+# - Synthèse mensuelle (Revenus/Charges/Dépenses/Net/Soldes rolling)
+# - Prévisionnel mensuel intelligent + graphiques d'évolution
+# Auteur : adapté pour Jeremy Verhelst — Python 3.9+
+
+from __future__ import annotations
 
 import io
 import re
 import json
 import unicodedata
-from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, Optional, List
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 import altair as alt
+
 
 # =========================
 # --------- CONFIG --------
@@ -23,44 +31,44 @@ st.set_page_config(
     layout="wide"
 )
 
-# --------- STYLES / MOBILE -------
 HIDE_SIDEBAR_CSS = """
 <style>
 .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 1rem; padding-right: 1rem;}
 .dataframe tbody tr th, .dataframe thead th {font-size: 0.9rem;}
-.stButton>button, .stDownloadButton>button {border-radius: 8px; padding: 0.6rem 1rem; font-weight: 600;}
+.stButton>button {border-radius: 8px; padding: 0.6rem 1rem; font-weight: 600;}
+.stDownloadButton>button {border-radius: 8px; padding: 0.6rem 1rem; font-weight: 600;}
 </style>
 """
 st.markdown(HIDE_SIDEBAR_CSS, unsafe_allow_html=True)
 
+
 # =========================
 # ----- CONSTANTES --------
 # =========================
-
 DEFAULT_RECURRING_CREDITS = [
-    {"label": "Participation Jeremy",   "amount": 1150.0},
-    {"label": "Participation Vanessa",  "amount": 1050.0},
-    {"label": "Participation Jeremy 2", "amount": 530.0},
+    {"label": "Participation Jeremy",  "amount": 1150.0},
+    {"label": "Participation Vanessa", "amount": 1050.0},
+    {"label": "Participation Jeremy 2","amount": 530.0},
 ]
 
 DEFAULT_PROVIDER_PATTERNS = [
-    {"Label": "Crédit immobilier", "Regex": r"(echeance.*pret|pret|credit|hypothec|immobilier|echeance\s*de\s*credit)"},
-    {"Label": "Assurance habitation / BPCE", "Regex": r"(bpce\s+assurances?|multirisque|habitation)"},
-    {"Label": "Assurance GENERALI IARD", "Regex": r"(generali\s+iard)"},
-    {"Label": "Assurance GENERALI VIE", "Regex": r"(generali\s+vie)"},
-    {"Label": "Freebox (Internet fixe)", "Regex": r"(free\s*telecom|freebox)"},
-    {"Label": "Free Mobile", "Regex": r"(free\s*mobile)"},
-    {"Label": "SFR (fixe/mobile)", "Regex": r"\bsfr\b"},
-    {"Label": "Électricité — Sowee (EDF)", "Regex": r"(sowee\s*by\s*edf|sowee)"},
-    {"Label": "Électricité — EDF", "Regex": r"\bedf\b"},
-    {"Label": "Électricité — Bellenergie|Electricité de Provence", "Regex": r"(bellenergie|electricit[eé]\s*de\s*provence)"},
-    {"Label": "Eau (SEM / régies)", "Regex": r"(soc(i[eé]t[eé])?\s*des\s*eaux|eau|veolia|suez|saur)"},
-    {"Label": "Abonnements streaming", "Regex": r"(netflix|spotify|deezer|prime|canal\+|molotov|youtube\s*premium)"},
-    {"Label": "Frais bancaires", "Regex": r"(cotis(ations)?\s+bancaires|frais\s+bancaires)"},
+    {"Label": "Crédit immobilier",                       "Regex": r"(echeance.*pret|pret|credit|hypothec|immobilier|echeance\s*de\s*credit)"},
+    {"Label": "Assurance habitation / BPCE",             "Regex": r"(bpce\s+assurances?|multirisque|habitation)"},
+    {"Label": "Assurance GENERALI IARD",                 "Regex": r"(generali\s+iard)"},
+    {"Label": "Assurance GENERALI VIE",                  "Regex": r"(generali\s+vie)"},
+    {"Label": "Freebox (Internet fixe)",                 "Regex": r"(free\s*telecom|freebox)"},
+    {"Label": "Free Mobile",                             "Regex": r"(free\s*mobile)"},
+    {"Label": "SFR (fixe/mobile)",                       "Regex": r"\bsfr\b"},
+    {"Label": "Électricité — Sowee (EDF)",               "Regex": r"(sowee\s*by\s*edf|sowee)"},
+    {"Label": "Électricité — EDF",                       "Regex": r"\bedf\b"},
+    {"Label": "Électricité — Bellenergie / EdP",         "Regex": r"(bellenergie|electricit[eé]\s*de\s*provence)"},
+    {"Label": "Eau (SEM / régies)",                      "Regex": r"(soc(i[eé]t[eé])?\s*des\s*eaux|eau|veolia|suez|saur)"},
+    {"Label": "Abonnements streaming",                   "Regex": r"(netflix|spotify|deezer|prime|canal\+|molotov|youtube\s*premium)"},
+    {"Label": "Frais bancaires",                         "Regex": r"(cotis(ations)?\s+bancaires|frais\s+bancaires)"},
 ]
 
 DEFAULT_PATTERN_ALIM = (
-    r"(carrefour|leclerc|e\.?leclerc|intermarch[eé]|super\s*u|u\s?express|u drive|systeme\s?u|"
+    r"(carrefour|leclerc|e\.?leclerc|intermarch[eé]|super\s*u|u\s?express|u\s*drive|systeme\s?u|"
     r"auchan|lidl|aldi|monoprix|picard|grand\s*frais|biocoop|spar|casino|geant|franprix|"
     r"market|hyper|drive|"
     r"boucherie|charcuterie|boulangerie|patisserie|p[aâ]tisserie|"
@@ -83,34 +91,52 @@ DEFAULT_PATTERN_CARBURANT = (
     r"carburant|gasoil|gazole|diesel|sans\s*plomb|sp95|sp98)"
 )
 DEFAULT_PATTERN_CASH = (
-    r"(retrait\s*(?:dab|gab)?|dab\b|gab\b|distributeur|"
-    r"atm|atm\s*withdrawal|withdrawal|"
-    r"retrait\s*especes|retrait\s*esp[eè]ces|"
-    r"\bcash\b)"
+    r"(retrait\s*(?:dab|gab)?|dab\b|gab\b|distributeur|atm|atm\s*withdrawal|withdrawal|"
+    r"retrait\s*especes|retrait\s*esp[eè]ces|\bcash\b)"
 )
+
+DEFAULT_EXPECTED_FIXED = []  # optionnel : overrides des charges fixes attendues
+# Exemple:
+# [{"Label":"Crédit immobilier","amount":950.0,"freq":"M"}, {"Label":"Électricité — EDF/Sowee","amount":160.0,"freq":"M"}]
+
+
+# =========================
+# ----- DATA CLASSES ------
+# =========================
+@dataclass
+class ColumnMap:
+    date: Optional[str]
+    label: Optional[str]
+    debit: Optional[str]
+    credit: Optional[str]
+    amount: Optional[str]
+
 
 # =========================
 # ----- UTILITAIRES -------
 # =========================
-
 def normalize_str(s: str) -> str:
+    """Normalise/latinise et compresse les espaces."""
     if not isinstance(s, str):
         s = str(s)
     s = s.strip()
-    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('ascii')
-    s = re.sub(r'\s+', ' ', s)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"\s+", " ", s)
     return s
 
 def try_read_csv(uploaded) -> pd.DataFrame:
+    """Lit le CSV en essayant plusieurs couples séparateur/encodage."""
     raw = uploaded.read()
+
     def read_with(params):
         return pd.read_csv(io.BytesIO(raw), **params)
+
     trials = [
         dict(sep=";", encoding="utf-8", engine="python"),
-        dict(sep=";", encoding="latin1", engine="python"),
         dict(sep=",", encoding="utf-8", engine="python"),
-        dict(sep=",", encoding="latin1", engine="python"),
         dict(sep="\t", encoding="utf-8", engine="python"),
+        dict(sep=";", encoding="latin1", engine="python"),
+        dict(sep=",", encoding="latin1", engine="python"),
     ]
     last_err = None
     for p in trials:
@@ -122,11 +148,15 @@ def try_read_csv(uploaded) -> pd.DataFrame:
     raise ValueError(f"Impossible de lire le CSV. Dernière erreur: {last_err}")
 
 def infer_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
+    """
+    Devine les colonnes clés: date, libellé, débit, crédit, montant (selon banques/export FR/EN).
+    """
     cols = {c.lower().strip(): c for c in df.columns}
-    candidates_date   = ["date operation", "date de comptabilisation", "date de valeur", "date", "valeur"]
-    candidates_label  = ["libelle operation", "libellé operation", "libelle simplifie", "libelle", "libellé", "label", "description"]
-    candidates_debit  = ["debit", "montant debit", "sortie", "debits"]
-    candidates_credit = ["credit", "montant credit", "entree", "credits"]
+
+    candidates_date   = ["date", "valeur", "date operation", "date_op", "operation date", "transaction date", "date de l'operation"]
+    candidates_label  = ["libelle", "libellé", "label", "description", "motif", "details", "remarque"]
+    candidates_debit  = ["debit", "debit (€)", "montant debit", "sortie", "debits"]
+    candidates_credit = ["credit", "credit (€)", "montant credit", "entree", "credits"]
     candidates_amount = ["montant", "amount", "valeur (€)", "value", "total", "solde mouvement"]
 
     def find(cands):
@@ -140,689 +170,521 @@ def infer_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
         return None
 
     return {
-        "date":   find(candidates_date),
-        "label":  find(candidates_label),
-        "debit":  find(candidates_debit),
+        "date": find(candidates_date),
+        "label": find(candidates_label),
+        "debit": find(candidates_debit),
         "credit": find(candidates_credit),
-        "amount": find(candidates_amount)
+        "amount": find(candidates_amount),
     }
+
+def _to_num(s) -> float:
+    """Convertit chaîne hétérogène en float, gère formats FR (1 234,56)."""
+    if pd.isna(s):
+        return np.nan
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s).replace("\u00A0", "").replace(" ", "")
+    if s.count(",") == 1 and s.count(".") == 0:
+        s = s.replace(",", ".")
+    s = re.sub(r"[^\d\.\-]", "", s)
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
 
 def coerce_amounts(df: pd.DataFrame, amount_col, debit_col, credit_col) -> pd.Series:
-    def to_num(s):
-        if pd.isna(s) or s == "":
-            return 0.0
-        if isinstance(s, (int, float)):
-            return float(s)
-        s = str(s).replace("\u00A0", "").replace(" ", "")
-        s = s.replace(".", "").replace(",", ".")
-        try:
-            return float(s)
-        except Exception:
-            s2 = re.sub(r"[^0-9\-\.+]", "", s)
-            try:
-                return float(s2)
-            except Exception:
-                return 0.0
-
+    """
+    Crée 'amount_signed' (négatif sorties, positif entrées).
+    Priorité : si 'amount' existe => signe conservé ; sinon crédit - débit.
+    """
     if amount_col and amount_col in df.columns:
-        amt = df[amount_col].map(to_num).fillna(0.0)
-        if debit_col and credit_col and debit_col in df.columns and credit_col in df.columns:
-            deb = df[debit_col].map(to_num).fillna(0.0)
-            cre = df[credit_col].map(to_num).fillna(0.0)
-            signed = cre + deb  # exports FR: débits souvent déjà négatifs
-            use_signed = signed.where(signed != 0, amt)
-            return use_signed.fillna(0.0)
+        amt = df[amount_col].map(_to_num)
         return amt.fillna(0.0)
 
-    deb = df[debit_col].map(to_num).fillna(0.0) if (debit_col and debit_col in df.columns) else pd.Series([0.0]*len(df))
-    cre = df[credit_col].map(to_num).fillna(0.0) if (credit_col and credit_col in df.columns) else pd.Series([0.0]*len(df))
-    return (cre + deb).fillna(0.0)
+    deb = df[debit_col].map(_to_num).fillna(0.0) if (debit_col and debit_col in df.columns) else 0.0
+    cre = df[credit_col].map(_to_num).fillna(0.0) if (credit_col and credit_col in df.columns) else 0.0
+    return (cre - deb).fillna(0.0)
 
-def extract_month_period(series: pd.Series) -> pd.Series:
-    return series.dt.to_period("M")
-
-def month_name_fr(period: pd.Period) -> str:
-    m = period.start_time.strftime("%B %Y")
-    return m[0].upper() + m[1:] if m else ""
-
-def last_day_of_period(p: pd.Period) -> pd.Timestamp:
-    # Renvoie un Timestamp naïf (sans timezone) au dernier jour à minuit
-    return p.asfreq('M').end_time.normalize()
-
-def currency(x: float) -> str:
+def label_matches(pat: str, text: str) -> bool:
     try:
-        return f"{x:,.2f} €".replace(",", " ").replace(".", ",")
-    except Exception:
-        return f"{x} €"
-
-def download_button(df: pd.DataFrame, label: str, file_name: str):
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button(label, csv, file_name=file_name, mime="text/csv")
-
-def sum_category_negative(df: pd.DataFrame, label_col: str, regex: str) -> float:
-    if df.empty: return 0.0
-    lab = df[label_col].fillna("").map(normalize_str)
-    mask_cat = lab.str.contains(regex, flags=re.IGNORECASE, regex=True, na=False)
-    amount = -df.loc[(mask_cat) & (df["amount_signed"] < 0), "amount_signed"].sum()
-    return float(max(amount, 0.0))
-
-def detect_recurring(df: pd.DataFrame, label_col: str, min_months: int = 3) -> pd.DataFrame:
-    if "mois" not in df.columns:
-        return pd.DataFrame(columns=["libelle_norm", "mois_count", "operations", "montant_median"])
-    labn = df[label_col].fillna("").map(normalize_str).str.lower()
-    by = df.assign(libelle_norm=labn).groupby(["libelle_norm", "mois"], as_index=False).agg(
-        montant_median=("amount_signed", "median"),
-        n_ops=("amount_signed", "size")
-    )
-    months_per_label = by.groupby("libelle_norm")["mois"].nunique().reset_index(name="mois_count")
-    ops_count = df.assign(libelle_norm=labn).groupby("libelle_norm")["amount_signed"].size().reset_index(name="operations")
-    med = df.assign(libelle_norm=labn).groupby("libelle_norm")["amount_signed"].median().reset_index(name="montant_median")
-    res = months_per_label.merge(ops_count, on="libelle_norm").merge(med, on="libelle_norm")
-    res = res.sort_values(["mois_count", "operations"], ascending=[False, False])
-    return res[res["mois_count"] >= min_months]
-
-# --- Fournisseurs/contrats récurrents ---
-def match_provider(label: str, provider_patterns: Dict[str, str]) -> List[str]:
-    """Retourne la liste des catégories 'provider' détectées dans le libellé."""
-    hits: List[str] = []
-    lab = normalize_str(label).lower()
-    for k, pat in provider_patterns.items():
-        try:
-            if re.search(pat, lab, flags=re.IGNORECASE):
-                hits.append(k)
-        except re.error:
-            continue
-    return hits
-
-def summarize_contracts(df_month: pd.DataFrame, label_col: str, provider_patterns: Dict[str, str]) -> Dict[str, float]:
-    out = {k: 0.0 for k in provider_patterns.keys()}
-    if df_month.empty: return out
-    charges = df_month[df_month["amount_signed"] < 0].copy()
-    charges["provider_hits"] = charges[label_col].fillna("").apply(lambda x: match_provider(x, provider_patterns))
-    for k in out.keys():
-        mask = charges["provider_hits"].apply(lambda hits: k in hits)
-        if mask.any():
-            out[k] = float(-charges.loc[mask, "amount_signed"].sum())
-    return out
-
-def infer_provider_amount_and_day(df_all: pd.DataFrame, date_col: str, label_col: str, regex: str, months_back: int = 6) -> Tuple[Optional[float], Optional[int]]:
-    if df_all.empty or not isinstance(regex, str) or regex.strip() == "":
-        return None, None
-    periods_sorted = np.sort(df_all["mois"].dropna().unique())
-    if len(periods_sorted) == 0: return None, None
-    last_p = periods_sorted[-1]
-    hist_months = [last_p - i for i in range(1, months_back + 1)]
-    hist_df = df_all[df_all["mois"].isin(hist_months)].copy()
-    if hist_df.empty: return None, None
-    try:
-        pat = re.compile(regex, re.IGNORECASE)
+        return re.search(pat, text or "", flags=re.IGNORECASE) is not None
     except re.error:
-        return None, None
-    lab = hist_df[label_col].fillna("").map(normalize_str).str.lower()
-    mask = lab.apply(lambda s: bool(pat.search(s)))
-    hist_df = hist_df[mask]
-    hist_df = hist_df[hist_df["amount_signed"] < 0]
-    if hist_df.empty: return None, None
-    med_amount = float(hist_df["amount_signed"].abs().median())
-    day_median = int(pd.Series(hist_df[date_col].dt.day).median())
-    return med_amount, day_median
+        return False
 
-def is_upcoming_empty_or_zero(dfu: pd.DataFrame) -> bool:
-    if dfu is None or dfu.empty: return True
-    col = "Montant (€)"
-    if col not in dfu.columns: return True
-    try:
-        return float(dfu[col].sum()) <= 0.0
-    except Exception:
-        return True
 
 # =========================
-# ------ APPLICATION -------
+# ----- SESSION STATE -----
 # =========================
+def ss_init(key: str, default):
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-# ⚠️ Étape 1 — Upload
-st.header("Étape 1 — Import du relevé")
-uploaded = st.file_uploader("Télécharge ton relevé bancaire (CSV)", type=["csv"])
+ss_init("providers_json", json.dumps(DEFAULT_PROVIDER_PATTERNS, ensure_ascii=False, indent=2))
+ss_init("credits_json", json.dumps(DEFAULT_RECURRING_CREDITS, ensure_ascii=False, indent=2))
+ss_init("pat_alim", DEFAULT_PATTERN_ALIM)
+ss_init("pat_anim", DEFAULT_PATTERN_ANIM)
+ss_init("pat_carb", DEFAULT_PATTERN_CARBURANT)
+ss_init("pat_cash", DEFAULT_PATTERN_CASH)
+ss_init("expected_fixed_json", json.dumps(DEFAULT_EXPECTED_FIXED, ensure_ascii=False, indent=2))
+ss_init("add_fixed_credits", True)
+
+
+# =========================
+# --------- UI ------------
+# =========================
+st.title("Analyse bancaire CSV — Budget mensuel + Prévisionnel")
+st.caption("Charge un relevé CSV, catégorise automatiquement, puis visualise le réel + un prévisionnel intelligent.")
+
+with st.expander("ℹ️ Comment préparer le CSV ?", expanded=False):
+    st.markdown(
+        "- Export natif de ta banque (CSV, séparateur `;`, `,` ou `\\t`).\n"
+        "- Encodage UTF‑8 ou Latin‑1 supporté.\n"
+        "- Colonnes attendues (si dispo) : **date**, **libellé**, **débit**, **crédit**, **montant**."
+    )
+
+uploaded = st.file_uploader("Dépose ton fichier CSV", type=["csv"])
+
+
+# =========================
+# --- WORKFLOW PRINCIPAL --
+# =========================
 if uploaded is None:
-    st.stop()
-
-# Lecture + préparation
-try:
-    df = try_read_csv(uploaded)
-except Exception as e:
-    st.error(f"Erreur lecture CSV : {e}")
-    st.stop()
-
-cols_map = infer_columns(df)
-date_col   = cols_map["date"]
-label_col  = cols_map["label"]
-debit_col  = cols_map["debit"]
-credit_col = cols_map["credit"]
-amount_col = cols_map["amount"]
-
-missing = []
-if not date_col: missing.append("date")
-if not label_col: missing.append("libellé/description")
-if (not amount_col) and (not (debit_col and credit_col)):
-    missing.append("montant (ou débit+crédit)")
-if missing:
-    st.error(
-        "Colonnes manquantes/non détectées: " + ", ".join(missing) + "\n\n"
-        f"Colonnes trouvées: {list(df.columns)}\n"
-        "Astuce: colonnes typiques 'Date operation', 'Libelle operation', 'Debit', 'Credit'."
-    )
-    st.stop()
-
-df = df.copy()
-df[date_col] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)  # -> naïf
-df = df[~df[date_col].isna()]
-df["amount_signed"] = coerce_amounts(df, amount_col, debit_col, credit_col)
-df[label_col] = df[label_col].astype(str)
-df["mois"] = extract_month_period(df[date_col])
-mois_detectes = np.sort(df["mois"].dropna().unique())
-
-# Étape 2 — Mois
-if len(mois_detectes) == 0:
-    st.error("Aucun mois détecté.")
-    st.stop()
-elif len(mois_detectes) == 1:
-    mois_choisi = mois_detectes[0]
+    st.info("Dépose ton CSV pour démarrer l’analyse.")
 else:
-    st.header("Étape 2 — Choix du mois")
-    mois_choisi = st.selectbox("Sélection du mois à analyser :", options=list(mois_detectes), format_func=month_name_fr)
+    # 1) Lecture robuste
+    df_raw = try_read_csv(uploaded)
 
-df_month = df[df["mois"] == mois_choisi].copy()
+    # 2) Mapping colonnes
+    colmap_dict = infer_columns(df_raw)
+    cmap = ColumnMap(**colmap_dict)
 
-# Info solde initial
-st.info("Par défaut, **solde initial au 1er du mois = 0,00 €** (modifiable plus bas).")
+    # 3) DataFrame standard
+    df = df_raw.copy()
 
-# Étape 3 — Règles/Regex (expander)
-with st.expander("⚙️ Ajuster les règles de détection (regex avancées)", expanded=False):
-    pattern_alim = st.text_input("Regex Alimentaire", value=DEFAULT_PATTERN_ALIM, key="pat_alim")
-    pattern_anim = st.text_input("Regex Animaux", value=DEFAULT_PATTERN_ANIM, key="pat_anim")
-    pattern_fuel = st.text_input("Regex Carburant", value=DEFAULT_PATTERN_CARBURANT, key="pat_fuel")
-    pattern_cash = st.text_input("Regex Retraits / Espèces (DAB/ATM)", value=DEFAULT_PATTERN_CASH, key="pat_cash")
-
-# Stats historiques utiles (courant/précédent/3m)
-prev_month = mois_choisi - 1
-prev_3_months = [mois_choisi - i for i in (1, 2, 3)]
-df_prev_month = df[df["mois"] == prev_month].copy()
-df_prev_3 = df[df["mois"].isin(prev_3_months)].copy()
-
-alim_curr = sum_category_negative(df_month,      label_col, pattern_alim)
-anim_curr = sum_category_negative(df_month,      label_col, pattern_anim)
-fuel_curr = sum_category_negative(df_month,      label_col, pattern_fuel)
-cash_curr = sum_category_negative(df_month,      label_col, pattern_cash)
-
-alim_last_3 = sum_category_negative(df_prev_3,   label_col, pattern_alim)
-anim_last_3 = sum_category_negative(df_prev_3,   label_col, pattern_anim)
-fuel_last_3 = sum_category_negative(df_prev_3,   label_col, pattern_fuel)
-cash_last_3 = sum_category_negative(df_prev_3,   label_col, pattern_cash)
-
-# Étape 3 bis — Fournisseurs/Contrats (expander)
-with st.expander("🧾 Fournisseurs / contrats (libellés & regex de détection)", expanded=False):
-    prov_df_default = pd.DataFrame(DEFAULT_PROVIDER_PATTERNS)
-    prov_df = st.data_editor(
-        prov_df_default, num_rows="dynamic", use_container_width=True, key="prov_editor",
-        column_config={
-            "Label": st.column_config.TextColumn("Libellé (affichage)"),
-            "Regex": st.column_config.TextColumn("Regex de détection (libellé opération)")
-        }
-    )
-
-provider_patterns: Dict[str, str] = {}
-for _, row in (prov_df if 'prov_df' in locals() else pd.DataFrame(DEFAULT_PROVIDER_PATTERNS)).dropna(subset=["Label", "Regex"]).iterrows():
-    lbl = str(row["Label"]).strip()
-    rgx = str(row["Regex"]).strip()
-    if lbl and rgx:
-        provider_patterns[lbl] = rgx
-
-if len(mois_detectes) >= 3:
-    recur_global = detect_recurring(df, label_col, min_months=3)
-    if not recur_global.empty:
-        with st.expander("📈 Références récurrentes détectées (≥ 3 mois)", expanded=False):
-            st.dataframe(recur_global.head(50), use_container_width=True)
-
-# Détection ce mois (réel passé)
-detected_by_provider = summarize_contracts(df_month, label_col, provider_patterns)
-
-colY, colN = st.columns(2)
-with colY:
-    want_update = st.button("🟩 Modifier les coûts détectés", use_container_width=True)
-with colN:
-    no_update = st.button("🟥 Conserver tel quel", use_container_width=True)
-
-# Attendus mensuels estimés (médiane historique)
-expected_map: Dict[str, float] = {}
-for k, rgx in provider_patterns.items():
-    est_amt, _ = infer_provider_amount_and_day(df, date_col, label_col, rgx, months_back=6)
-    expected_map[k] = float(est_amt or 0.0)
-
-updated_costs = detected_by_provider.copy()
-
-if want_update:
-    st.subheader("Étape 4 — Modification guidée des coûts mensuels")
-    st.caption("Pour chaque contrat : **passée = réel à date** / **attendue = référence mensuelle** (historique médian ou valeur saisie).")
-    contrats = sorted(list(provider_patterns.keys()), key=lambda c: (-detected_by_provider.get(c, 0.0), c.lower()))
-    for k in contrats:
-        passed = float(detected_by_provider.get(k, 0.0))
-        expected = float(expected_map.get(k, 0.0))
-        st.markdown(f"**{k}** — passée : **{currency(passed)}**  |  attendue : **{currency(expected)}**")
-        new_val = st.number_input(
-            f"Montant mensuel attendu pour {k}",
-            min_value=0.0, step=1.0, value=expected, key=f"cost_{k}"
-        )
-        updated_costs[k] = new_val
-    st.info("Les montants saisis remplacent la détection automatique pour la projection.")
-elif no_update:
-    st.write("Très bien, je conserve la détection actuelle pour la suite.")
-
-# Mois courant ?
-is_current_month = (str(mois_choisi) == pd.Timestamp.now(tz="Europe/Paris").strftime("%Y-%m"))
-
-# Étape 5 — Échéances à venir (pré-remplissage + formulaire)
-upcoming_df = pd.DataFrame(columns=["Label", "Date", "Montant (€)"])
-if is_current_month:
-    if (("upcoming_df" not in st.session_state)
-        or (st.session_state.get("upcoming_period") != str(mois_choisi))
-        or is_upcoming_empty_or_zero(st.session_state.get("upcoming_df"))):
-        rows_auto = []
-
-        # Crédit immo
-        credit_label = "Crédit immobilier"
-        default_credit_contract = float(updated_costs.get(credit_label, 0.0) or 0.0)
-        credit_regex = provider_patterns.get(
-            credit_label, r"(echeance.*pret|pret|credit|hypothec|immobilier|echeance\s*de\s*credit)"
-        )
-        if default_credit_contract <= 0:
-            est_amt, _ = infer_provider_amount_and_day(df, date_col, label_col, credit_regex, months_back=6)
-            default_credit_contract = est_amt if (est_amt and est_amt > 0) else 1411.0
-
-        last_day = last_day_of_period(mois_choisi)
-        _, inferred_day = infer_provider_amount_and_day(df, date_col, label_col, credit_regex, months_back=6)
-        default_day = max(1, min((inferred_day or 28), last_day.day))
-        default_date = pd.Timestamp(year=last_day.year, month=last_day.month, day=default_day)
-        rows_auto.append({"Label": credit_label, "Date": default_date, "Montant (€)": float(default_credit_contract)})
-
-        # Autres fournisseurs pas encore passés ce mois
-        lab_norm_month = df_month[label_col].fillna("").map(normalize_str).str.lower()
-        for k, rgx in provider_patterns.items():
-            if k == credit_label:
-                continue
-            try:
-                pat = re.compile(rgx, re.IGNORECASE)
-            except re.error:
-                continue
-            deja_passe = lab_norm_month.apply(lambda s: bool(pat.search(s))).any()
-            if not deja_passe:
-                est_amt, est_day = infer_provider_amount_and_day(df, date_col, label_col, rgx, months_back=6)
-                if est_amt and est_amt > 0:
-                    day = max(1, min((est_day or 28), last_day.day))
-                    rows_auto.append({
-                        "Label": k,
-                        "Date": pd.Timestamp(year=last_day.year, month=last_day.month, day=day),
-                        "Montant (€)": float(est_amt)
-                    })
-
-        upcoming_df = pd.DataFrame(rows_auto, columns=["Label", "Date", "Montant (€)"])
-        st.session_state["upcoming_df"] = upcoming_df
-        st.session_state["upcoming_period"] = str(mois_choisi)
+    # libellé normalisé
+    if cmap.label and cmap.label in df.columns:
+        df["label"] = df[cmap.label].astype(str).map(normalize_str).str.lower()
     else:
-        upcoming_df = st.session_state["upcoming_df"]
+        df["label"] = ""
 
-    # Formulaire simple
-    last_day = last_day_of_period(mois_choisi)
-    default_day = min(28, last_day.day)
-    default_date = pd.Timestamp(year=last_day.year, month=last_day.month, day=default_day)
-    with st.form("form_upcoming"):
-        rows = []
-        use_credit = st.checkbox("Inclure échéance Crédit immobilier", value=True, key="use_credit_ck")
-        credit_amount = st.number_input(
-            "Montant Crédit immobilier (€)", min_value=0.0, step=1.0,
-            value=float(upcoming_df[upcoming_df["Label"]=="Crédit immobilier"]["Montant (€)"].sum() or 1411.0),
-            key="credit_amt_in"
-        )
-        credit_date = st.date_input(
-            "Date échéance Crédit immobilier",
-            value=default_date.date(),
-            min_value=last_day.replace(day=1).date(),
-            max_value=last_day.date(),
-            key="credit_date_in"
-        )
-        extra_n = st.number_input("Échéances supplémentaires (nombre)", min_value=0, max_value=10, value=0, step=1, key="extra_n")
-        extra_items = []
-        for i in range(int(extra_n)):
-            st.markdown(f"**Échéance #{i+1}**")
-            lbl = st.text_input(f"Libellé #{i+1}", value="", key=f"extra_lbl_{i}")
-            amt = st.number_input(f"Montant #{i+1} (€)", min_value=0.0, step=1.0, value=0.0, key=f"extra_amt_{i}")
-            dte = st.date_input(
-                f"Date #{i+1}",
-                value=default_date.date(),
-                min_value=last_day.replace(day=1).date(),
-                max_value=last_day.date(),
-                key=f"extra_date_{i}"
-            )
-            extra_items.append((lbl, amt, pd.Timestamp(dte)))
-        submitted = st.form_submit_button("Enregistrer les échéances")
-        if submitted:
-            if use_credit and credit_amount > 0:
-                rows.append({"Label": "Crédit immobilier", "Date": pd.Timestamp(credit_date), "Montant (€)": float(credit_amount)})
-            for lbl, amt, dte in extra_items:
-                if lbl and amt > 0:
-                    rows.append({"Label": lbl, "Date": dte, "Montant (€)": float(amt)})
-            upcoming_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Label", "Date", "Montant (€)"])
-            st.session_state["upcoming_df"] = upcoming_df
-            st.success("Échéances enregistrées ✅")
+    # date
+    if cmap.date and cmap.date in df.columns:
+        df["date"] = pd.to_datetime(df[cmap.date], errors="coerce", dayfirst=True, infer_datetime_format=True)
+    else:
+        df["date"] = pd.NaT
 
-# =========================
-# Charges fixes — statut / tableau
-# =========================
-planned_lookup: Dict[str, Tuple[float, pd.Timestamp]] = {}
-if is_current_month:
-    updf = st.session_state.get("upcoming_df", pd.DataFrame(columns=["Label", "Date", "Montant (€)"]))
-    if isinstance(updf, pd.DataFrame) and not updf.empty:
-        planned_lookup = {
-            str(r["Label"]).strip(): (float(r["Montant (€)"]), pd.to_datetime(r["Date"], errors="coerce"))
-            for _, r in updf.iterrows()
-        }
+    # 4) Montants signés
+    df["amount_signed"] = coerce_amounts(df, cmap.amount, cmap.debit, cmap.credit).fillna(0.0)
 
-rows = []
-total_expected = 0.0
-total_detected = 0.0
-total_a_venir = 0.0
+    # Si la date est manquante, on met un mois NaN. Sinon mois AAAA-MM.
+    df["year"] = df["date"].dt.year
+    df["month"] = df["date"].dt.to_period("M").astype(str)
 
-for k, rgx in provider_patterns.items():
-    detected = round(float(detected_by_provider.get(k, 0.0)), 2)  # positif pour affichage
-    expected = round(float(updated_costs.get(k, 0.0) or expected_map.get(k, 0.0) or 0.0), 2)
+    # 5) Catégorisation automatique (fixes d'abord, puis variables)
+    df["category"] = "Autres"
 
-    statut = "réglée" if detected > 0 else ("à venir" if is_current_month else "non détectée")
-    date_prev = None
-    montant_av = 0.0
+    # --- Parse providers + consolidation EDF/Sowee ---
+    try:
+        providers = json.loads(st.session_state["providers_json"])
+        if not isinstance(providers, list):
+            providers = []
+    except Exception:
+        providers = []
 
-    if detected > 0 and expected > 0 and detected + 1e-6 < expected:
-        statut = "partiellement réglée"
-        if is_current_month:
-            if k in planned_lookup:
-                montant_av, date_prev = planned_lookup[k]
-            else:
-                montant_av = max(expected - detected, 0.0)
-                _, est_day = infer_provider_amount_and_day(df, date_col, label_col, rgx, months_back=6)
-                if est_day:
-                    last_day = last_day_of_period(mois_choisi)
-                    date_prev = pd.Timestamp(year=last_day.year, month=last_day.month, day=min(est_day, last_day.day))
-            total_a_venir += float(montant_av or 0.0)
-    elif detected == 0:
-        if is_current_month:
-            statut = "à venir"
-            if k in planned_lookup:
-                montant_av, date_prev = planned_lookup[k]
-            else:
-                montant_av = expected
-                _, est_day = infer_provider_amount_and_day(df, date_col, label_col, rgx, months_back=6)
-                if est_day:
-                    last_day = last_day_of_period(mois_choisi)
-                    date_prev = pd.Timestamp(year=last_day.year, month=last_day.month, day=min(est_day, last_day.day))
-            total_a_venir += float(montant_av or 0.0)
-        else:
-            statut = "non détectée"
+    # Consolidation EDF/Sowee : on supprime entrées EDF/Sowee et on ajoute une entrée unique
+    consolidated = []
+    elec_added = False
+    for p in providers:
+        lab = (p.get("Label") or "").strip()
+        rgx = (p.get("Regex") or "").strip()
+        if not lab or not rgx:
+            continue
+        if ("edf" in lab.lower()) or ("sowee" in lab.lower()):
+            if not elec_added:
+                consolidated.append({"Label": "Électricité — EDF/Sowee", "Regex": r"(sowee|edf)"})
+                elec_added = True
+            continue
+        consolidated.append({"Label": lab, "Regex": rgx})
+    providers = consolidated
 
-    total_expected += expected
-    total_detected += detected
+    provider_labels = [p.get("Label") for p in providers if p.get("Label")]
 
-    rows.append({
-        "Contrat": k,
-        "Réel à date (€)": detected,
-        "Prévu mois (€)": expected,
-        "Statut": statut,
-        "Date prévue": (date_prev.strftime("%Y-%m-%d") if (date_prev is not None and str(date_prev) != "NaT") else ""),
-        "Montant à venir (€)": round(float(montant_av or 0.0), 2)
-    })
+    # Fixes (first match wins)
+    for p in providers:
+        lab, rgx = p.get("Label"), p.get("Regex")
+        if lab and rgx:
+            mask = (df["category"] == "Autres") & df["label"].apply(lambda x: label_matches(rgx, x))
+            df.loc[mask, "category"] = lab
 
-fixed_status_df = pd.DataFrame(rows)
-charges_df = fixed_status_df[["Contrat", "Prévu mois (€)"]].rename(columns={"Prévu mois (€)": "Montant (€/mois)"})
-total_charges = float(charges_df["Montant (€/mois)"].sum())
+    # Variables (uniquement si encore Autres)
+    pat_alim = st.session_state["pat_alim"]
+    pat_anim = st.session_state["pat_anim"]
+    pat_carb = st.session_state["pat_carb"]
+    pat_cash = st.session_state["pat_cash"]
 
-# =========================
-# Participations (Revenus fixes) — total visible + expander détail
-# =========================
-if "credits_rows" not in st.session_state:
-    st.session_state["credits_rows"] = DEFAULT_RECURRING_CREDITS
+    mask_autres = df["category"] == "Autres"
+    df.loc[mask_autres & df["label"].apply(lambda x: label_matches(pat_alim, x)), "category"] = "Alimentation"
+    df.loc[mask_autres & df["label"].apply(lambda x: label_matches(pat_anim, x)), "category"] = "Animaux"
+    df.loc[mask_autres & df["label"].apply(lambda x: label_matches(pat_carb, x)), "category"] = "Carburant"
+    df.loc[mask_autres & df["label"].apply(lambda x: label_matches(pat_cash, x)), "category"] = "Retraits/Especes"
 
-# Calcule le total (valeur principale)
-sum_fixed_credits = float(sum(c["amount"] for c in st.session_state["credits_rows"]))
+    # 6) Ajout des crédits récurrents (lignes synthétiques optionnelles)
+    add_fixed = st.checkbox("Ajouter les crédits récurrents mensuels (lignes synthétiques)", value=st.session_state["add_fixed_credits"])
+    st.session_state["add_fixed_credits"] = add_fixed
 
-st.subheader("Participations (revenus fixes)")
-c_part_tot, c_part_other = st.columns([1,1])
-with c_part_tot:
-    st.metric("Participations — total", currency(sum_fixed_credits))
+    synth_rows = []
+    if add_fixed:
+        try:
+            rec_credits = json.loads(st.session_state["credits_json"])
+            months_present = sorted(df["month"].dropna().unique().tolist())
+            target_months = months_present or [datetime.now().strftime("%Y-%m")]
+            for m in target_months:
+                for c in rec_credits:
+                    synth_rows.append(
+                        dict(
+                            date=pd.Period(m).to_timestamp(how="start"),
+                            label=normalize_str(c.get("label", "")),
+                            amount_signed=float(c.get("amount", 0.0)),
+                            year=int(m.split("-")[0]),
+                            month=m,
+                            category="Crédits fixes"
+                        )
+                    )
+        except Exception as e:
+            st.warning(f"Impossible de parser les crédits récurrents : {e}")
 
-with st.expander("Détail des participations (éditable)", expanded=False):
-    credit_cols = st.columns(3)
-    edited_rows = []
-    for i, c in enumerate(st.session_state["credits_rows"]):
-        with credit_cols[i % 3]:
-            label_val = st.text_input(f"Libellé crédit #{i+1}", value=c["label"], key=f"rc_lbl_{i}")
-            amt_val = st.number_input(f"Montant #{i+1} (€)", min_value=0.0, step=10.0, value=float(c["amount"]), key=f"rc_amt_{i}")
-            edited_rows.append({"label": label_val, "amount": float(amt_val)})
+    if synth_rows:
+        df = pd.concat([df, pd.DataFrame(synth_rows)], ignore_index=True)
 
-    col_add1, col_add2 = st.columns([2,1])
-    with col_add1:
-        new_lbl = st.text_input("Libellé (nouvelle participation)", key="new_credit_lbl")
-    with col_add2:
-        new_amt = st.number_input("Montant (€)", min_value=0.0, step=10.0, value=0.0, key="new_credit_amt")
-    btn_cols = st.columns([1,1])
-    with btn_cols[0]:
-        if st.button("Ajouter la participation", key="btn_add_credit"):
-            if new_lbl and new_amt > 0:
-                st.session_state["credits_rows"].append({"label": new_lbl, "amount": float(new_amt)})
-                st.rerun()
-    with btn_cols[1]:
-        if st.button("Appliquer les modifications", key="btn_apply_credit"):
-            st.session_state["credits_rows"] = edited_rows
-            st.rerun()
-
-# Recalcule total après éventuelle édition
-sum_fixed_credits = float(sum(c["amount"] for c in st.session_state["credits_rows"]))
-
-# Autres revenus (toujours séparé)
-other_incomes = st.number_input("Autres revenus (mensuels)", min_value=0.0, step=10.0, value=0.0, key="other_inc")
-
-# =========================
-# Dépenses variables — total visible + expander 4 valeurs
-# =========================
-st.subheader("Dépenses variables")
-
-# Pré-remplissage: courant (observé) ou moyenne 3 derniers mois
-use_3m = st.checkbox("Pré-remplir avec la moyenne des 3 derniers mois", value=False, key="use_3m_prefill")
-
-# Valeurs par défaut
-if use_3m:
-    var_alim_def = round(alim_last_3 / 3.0, 2)
-    var_anim_def = round(anim_last_3 / 3.0, 2)
-    var_fuel_def = round(fuel_last_3 / 3.0, 2)
-    var_cash_def = round(cash_last_3 / 3.0, 2)
-else:
-    var_alim_def = round(alim_curr, 2)
-    var_anim_def = round(anim_curr, 2)
-    var_fuel_def = round(fuel_curr, 2)
-    var_cash_def = round(cash_curr, 2)
-
-# Les 4 valeurs modifiables sont dans un expander
-with st.expander("Détail des variables (modifiable)", expanded=False):
-    cva1, cva2, cva3, cva4 = st.columns(4)
-    var_alim = cva1.number_input("Alimentaire (€)", min_value=0.0, step=5.0, value=var_alim_def, key="var_alim_in")
-    var_anim = cva2.number_input("Animaux (€)",     min_value=0.0, step=5.0, value=var_anim_def, key="var_anim_in")
-    var_fuel = cva3.number_input("Carburant (€)",   min_value=0.0, step=5.0, value=var_fuel_def, key="var_fuel_in")
-    var_cash = cva4.number_input("Retraits/espèces (€)", min_value=0.0, step=5.0, value=var_cash_def, key="var_cash_in")
-
-# Total visible (hors marge)
-var_total = float(st.session_state.get("var_alim_in", var_alim_def)
-                  + st.session_state.get("var_anim_in", var_anim_def)
-                  + st.session_state.get("var_fuel_in", var_fuel_def)
-                  + st.session_state.get("var_cash_in", var_cash_def))
-
-c_var_total, c_var_buf = st.columns([1,1])
-with c_var_total:
-    st.metric("Variables — total (hors marge)", currency(var_total))
-with c_var_buf:
-    buffer_safety = st.number_input("Marge de sécurité / aléas", min_value=0.0, step=10.0, value=0.0, key="var_buffer")
-
-# =========================
-# Agrégats & Projection (résultats en haut)
-# =========================
-sum_incomes = float(sum_fixed_credits + other_incomes)
-sum_fixed   = float(total_charges)
-sum_var     = float(var_total + buffer_safety)
-projected_balance_full_month = sum_incomes - (sum_fixed + sum_var)
-
-# Paramètres de trésorerie
-solde_initial = st.number_input("Solde initial au 1er du mois (€)", value=0.0, step=50.0, key="solde_init")
-
-# Date facultative pour autres revenus (robuste)
-use_other_income_date = st.checkbox("Définir une date pour 'Autres revenus' ?", value=False, key="use_oi_date")
-other_income_date = None
-if use_other_income_date:
-    tmp_last = last_day_of_period(mois_choisi)
-    tmp_first = tmp_last.replace(day=1)
-    other_income_date = st.date_input(
-        "Date pour 'Autres revenus' (facultatif)",
-        value=tmp_first.date(),
-        min_value=tmp_first.date(),
-        max_value=tmp_last.date(),
-        key="other_income_date"
+    # =========================
+    # ---- SOLDE ROLLING -----
+    # =========================
+    st.info(
+        "ℹ️ **Important**\n\n"
+        "Merci d’ajouter **le solde du mois précédent**, tel qu’il apparaît dans "
+        "**« Consulter les relevés de comptes »** du compte bancaire concerné.\n\n"
+        "Ce solde est utilisé comme point de départ pour calculer automatiquement les soldes mensuels."
     )
 
-# ---- Résultats (en haut)
-st.subheader("Résultats de projection — Mois complet")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Revenus totaux", currency(sum_incomes))
-c2.metric("Charges fixes (plein mois)", currency(sum_fixed))
-c3.metric("Dépenses variables (avec marge)", currency(sum_var))
-c4.metric("Solde prévisionnel (plein mois)", currency(projected_balance_full_month))
+    seed_initial = st.number_input(
+        "💡 Solde au début du mois précédent le premier mois du CSV",
+        help="Exemple : si le CSV commence en février, saisir le solde réel au 01/01.",
+        value=0.0,
+        step=50.0
+    )
 
-# =========================
-# Graphique “Trésorerie du mois (réel & projection)”
-# =========================
-first_day = last_day_of_period(mois_choisi).replace(day=1)
+    # =========================
+    # ---- SYNTHESE MENSUELLE (RÉEL) ---
+    # =========================
+    df_calc = df.dropna(subset=["month"]).copy()
 
-# 🔧 Correction TZ : tout en naïf
-today_local = pd.Timestamp.now(tz="Europe/Paris").normalize().tz_localize(None)
+    # Flags flux
+    is_income = df_calc["amount_signed"] > 0
+    is_fixed_charge = df_calc["category"].isin(provider_labels) & (df_calc["amount_signed"] < 0)
+    is_variable_expense = (df_calc["amount_signed"] < 0) & (~df_calc["category"].isin(provider_labels))
 
-cutoff_date = min(today_local, last_day_of_period(mois_choisi))
-max_real_date = df_month[date_col].max() if not df_month.empty else first_day
-cutoff_date = min(cutoff_date, max_real_date)
+    months = sorted(df_calc["month"].dropna().unique().tolist())
 
-# Série réelle (cumul)
-events_real = df_month.groupby(df_month[date_col].dt.date)["amount_signed"].sum().rename("amount").reset_index()
-events_real["date"] = pd.to_datetime(events_real[date_col].astype(str))
-events_real = events_real[["date", "amount"]]
-dates_all_to_cutoff = pd.date_range(first_day, cutoff_date, freq="D")
-real_daily = pd.DataFrame({"date": dates_all_to_cutoff}).merge(events_real, on="date", how="left").fillna({"amount": 0.0})
-real_daily["balance"] = solde_initial + real_daily["amount"].cumsum()
+    m_income = df_calc[is_income].groupby("month")["amount_signed"].sum()
+    m_fixed  = df_calc[is_fixed_charge].groupby("month")["amount_signed"].sum()         # négatif
+    m_var    = df_calc[is_variable_expense].groupby("month")["amount_signed"].sum()     # négatif
+    m_net    = df_calc.groupby("month")["amount_signed"].sum()
 
-# 🔵 Série projetée
-proj_events = []
+    summary = pd.DataFrame({"month": months})
+    summary["revenus"] = summary["month"].map(m_income).fillna(0.0)
+    summary["charges_fixes"] = summary["month"].map(m_fixed).fillna(0.0)               # négatif
+    summary["depenses_variables"] = summary["month"].map(m_var).fillna(0.0)            # négatif
+    summary["net_mois"] = summary["month"].map(m_net).fillna(0.0)
 
-# A) Charges fixes restantes
-restants = fixed_status_df[(fixed_status_df["Montant à venir (€)"] > 0)]
-for _, r in restants.iterrows():
-    if r["Date prévue"]:
-        d = pd.to_datetime(r["Date prévue"])
-        if d.date() > cutoff_date.date():
-            proj_events.append({"date": d.normalize(), "amount": -float(r["Montant à venir (€)"])})
+    # Rolling soldes
+    summary["solde_debut"] = 0.0
+    summary["solde_fin"] = 0.0
+    running = float(seed_initial)
+    for i in range(len(summary)):
+        summary.loc[i, "solde_debut"] = running
+        running = running + float(summary.loc[i, "net_mois"])
+        summary.loc[i, "solde_fin"] = running
 
-# B) Revenus **datés dans le CSV**
-incomes_future_csv = df_month[(df_month["amount_signed"] > 0) & (df_month[date_col] > cutoff_date)]
-if not incomes_future_csv.empty:
-    inc_by_date = incomes_future_csv.groupby(incomes_future_csv[date_col].dt.normalize())["amount_signed"].sum().reset_index()
-    inc_by_date.rename(columns={date_col: "date", "amount_signed": "amount"}, inplace=True)
-    for _, row in inc_by_date.iterrows():
-        proj_events.append({"date": row["date"], "amount": float(row["amount"])})
+    # =========================
+    # ---- AFFICHAGE RAPIDE ---
+    # =========================
+    st.subheader("💶 Synthèse mensuelle (lecture rapide) — Réel")
+    colk1, colk2, colk3, colk4 = st.columns(4)
 
-# C) Autres revenus facultatifs (si datés)
-if other_incomes > 0 and other_income_date:
-    dt = pd.Timestamp(other_income_date)
-    if dt.date() > cutoff_date.date():
-        proj_events.append({"date": dt.normalize(), "amount": float(other_incomes)})
+    colk1.metric("Revenus (total)", f"{summary['revenus'].sum():,.2f} €".replace(",", " "))
+    colk2.metric("Charges fixes (total)", f"{summary['charges_fixes'].sum():,.2f} €".replace(",", " "))
+    colk3.metric("Dépenses variables (total)", f"{summary['depenses_variables'].sum():,.2f} €".replace(",", " "))
+    colk4.metric("Solde final (rolling)", f"{summary['solde_fin'].iloc[-1]:,.2f} €".replace(",", " ") if len(summary) else f"{seed_initial:,.2f} €".replace(",", " "))
 
-# D) Variables restantes (impact max en fin de mois)
-# NB: ici on prend tout le total variables saisi (déjà agrégé), donc pas besoin de calculer le "reste".
-last_day = last_day_of_period(mois_choisi)
-if var_total > 0:
-    proj_events.append({"date": last_day, "amount": -var_total - buffer_safety})
-
-proj_df = pd.DataFrame(proj_events)
-if not proj_df.empty:
-    proj_df = proj_df.groupby("date", as_index=False)["amount"].sum()
-    if (cutoff_date in real_daily["date"].values):
-        balance_cutoff = float(real_daily.loc[real_daily["date"] == cutoff_date, "balance"].iloc[0])
-    else:
-        balance_cutoff = float(real_daily["balance"].iloc[-1])
-    dates_future = pd.date_range(cutoff_date + pd.Timedelta(days=1), last_day, freq="D")
-    future_daily = pd.DataFrame({"date": dates_future}).merge(proj_df, on="date", how="left").fillna({"amount": 0.0})
-    future_daily["balance"] = balance_cutoff + future_daily["amount"].cumsum()
-    real_plot = real_daily.assign(kind="Réel")[["date", "balance", "kind"]]
-    proj_plot = future_daily.assign(kind="Projection")[["date", "balance", "kind"]]
-    treasury_plot = pd.concat([real_plot, proj_plot], ignore_index=True)
-else:
-    treasury_plot = real_daily.assign(kind="Réel")[["date", "balance"]]
-    treasury_plot["kind"] = "Réel"
-
-st.subheader("Trésorerie du mois (réel & projection)")
-line = alt.Chart(treasury_plot).mark_line(size=2).encode(
-    x=alt.X("date:T", title="Date"),
-    y=alt.Y("balance:Q", title="Trésorerie (€)"),
-    color=alt.Color("kind:N", scale=alt.Scale(domain=["Réel", "Projection"], range=["#2C7BE5", "#2C7BE5"]), legend=None),
-    strokeDash=alt.condition(alt.datum.kind == "Projection", alt.value([6,4]), alt.value([1])),
-    tooltip=[alt.Tooltip("date:T", title="Date"),
-             alt.Tooltip("balance:Q", title="Trésorerie", format=",.2f")]
-).properties(height=320)
-st.altair_chart(line, use_container_width=True)
-
-# _Expanders_ — Listes & exports
-if is_current_month:
-    with st.expander("Échéances planifiées / prévues ce mois", expanded=False):
-        updf_show = st.session_state.get("upcoming_df", pd.DataFrame(columns=["Label","Date","Montant (€)"]))
-        if isinstance(updf_show, pd.DataFrame) and not updf_show.empty:
-            st.dataframe(updf_show.sort_values("Date"), hide_index=True, use_container_width=True)
-        else:
-            st.info("Aucune échéance planifiée pour l’instant.")
-
-with st.expander(f"Charges du mois — Réel vs Prévu ({month_name_fr(mois_choisi)})", expanded=False):
     st.dataframe(
-        fixed_status_df[["Contrat", "Réel à date (€)", "Prévu mois (€)", "Montant à venir (€)", "Date prévue", "Statut"]],
-        hide_index=True, use_container_width=True
+        summary[["month","revenus","charges_fixes","depenses_variables","net_mois","solde_debut","solde_fin"]],
+        use_container_width=True,
+        height=260
     )
 
-with st.expander("Charges fixes — (table des attendus mensuels)", expanded=False):
-    st.dataframe(charges_df, hide_index=True, use_container_width=True)
-    st.success(f"**Total charges fixes prévues (mois complet) : {currency(total_charges)}**")
+    # =========================
+    # ---- PREVISIONNEL INTELLIGENT ---
+    # =========================
+    st.divider()
+    st.subheader("🔮 Prévisionnel mensuel (intelligent)")
 
-with st.expander("Exports", expanded=False):
-    projection_payload = {
-        "mois": str(mois_choisi),
-        "revenus_fixes": {c["label"]: c["amount"] for c in st.session_state["credits_rows"]},
-        "revenus_autres": other_incomes,
-        "revenus_total": sum_incomes,
-        "charges_fixes": sum_fixed,
-        "variables": var_total,
-        "marge_securite": buffer_safety,
-        "solde_previsionnel_plein_mois": projected_balance_full_month,
-        "charges_detail": {k: float(v or 0.0) for k, v in updated_costs.items()}
-    }
-    if is_current_month:
-        updf = st.session_state.get("upcoming_df", pd.DataFrame(columns=["Label","Date","Montant (€)"]))
-        if isinstance(updf, pd.DataFrame) and (not updf.empty):
-            projection_payload["echeances_a_venir"] = [
-                {"label": str(r["Label"]), "date": pd.Timestamp(r["Date"]).strftime("%Y-%m-%d"), "montant": float(r["Montant (€)"])}
-                for _, r in updf.iterrows()
-            ]
-            projection_payload["solde_previsionnel_fin_de_mois"] = float(
-                sum_incomes - (var_total + buffer_safety + updf["Montant (€)"].sum())
-            )
+    colp1, colp2, colp3 = st.columns([1, 1, 2])
+    with colp1:
+        horizon = st.slider("Horizon (mois)", min_value=1, max_value=24, value=6)
+    with colp2:
+        method_var = st.selectbox("Méthode dépenses variables", ["Médiane (robuste)", "Moyenne glissante"], index=0)
+    with colp3:
+        window = st.slider("Historique utilisé (mois)", min_value=1, max_value=12, value=3)
+
+    expected_fixed_json = st.text_area(
+        "⚙️ (Optionnel) Charges fixes attendues (JSON) — sinon estimation automatique (médiane historique)",
+        value=st.session_state["expected_fixed_json"],
+        height=140
+    )
+    st.session_state["expected_fixed_json"] = expected_fixed_json
+
+    # 1) Revenus récurrents (mensuels)
+    try:
+        rec_credits = json.loads(st.session_state["credits_json"])
+        monthly_rec_income = sum(float(c.get("amount", 0.0)) for c in rec_credits)
+    except Exception:
+        monthly_rec_income = 0.0
+
+    # 2) Overrides charges fixes (facultatif)
+    expected_fixed = {}
+    try:
+        tmp = json.loads(expected_fixed_json)
+        if isinstance(tmp, list):
+            for item in tmp:
+                lab = (item.get("Label") or "").strip()
+                amt = float(item.get("amount", 0.0))
+                freq = (item.get("freq") or "M").strip()
+                if lab:
+                    expected_fixed[lab] = {"amount": amt, "freq": freq}
+    except Exception:
+        expected_fixed = {}
+
+    # 3) Historique utilisé (dernier window mois)
+    hist_months = summary["month"].tolist()
+    hist_tail = hist_months[-window:] if len(hist_months) >= 1 else hist_months
+    df_hist = df_calc[df_calc["month"].isin(hist_tail)].copy()
+
+    # 4) Estimation auto des charges fixes (médiane des ABS par catégorie fixe)
+    auto_fixed = {}
+    for lab in provider_labels:
+        vals = df_hist[(df_hist["category"] == lab) & (df_hist["amount_signed"] < 0)]["amount_signed"].abs()
+        if len(vals) > 0:
+            auto_fixed[lab] = float(vals.median())
+
+    # 5) Estimation dépenses variables mensuelles (sur totaux variables/mois)
+    df_hist["is_var"] = (df_hist["amount_signed"] < 0) & (~df_hist["category"].isin(provider_labels))
+    var_by_month = df_hist[df_hist["is_var"]].groupby("month")["amount_signed"].sum().abs()
+    if len(var_by_month) == 0:
+        est_var = 0.0
+    else:
+        est_var = float(var_by_month.median()) if method_var.startswith("Médiane") else float(var_by_month.mean())
+
+    # 6) Mois futurs
+    if len(summary) > 0:
+        last_month = pd.Period(summary["month"].iloc[-1], freq="M")
+    else:
+        last_month = pd.Period(datetime.now().strftime("%Y-%m"), freq="M")
+
+    future_months = [(last_month + i).strftime("%Y-%m") for i in range(1, horizon + 1)]
+
+    # 7) Charges fixes prévues (somme des catégories fixes)
+    def fixed_total_for_month() -> float:
+        total = 0.0
+        for lab in provider_labels:
+            if lab in expected_fixed:
+                # fréquence simple: M (mensuel). Extensions possibles ensuite.
+                total += float(expected_fixed[lab]["amount"])
+            else:
+                total += float(auto_fixed.get(lab, 0.0))
+        return total
+
+    fixed_total = fixed_total_for_month()
+
+    forecast = pd.DataFrame({"month": future_months})
+    forecast["revenus_prevus"] = float(monthly_rec_income)
+    forecast["charges_fixes_prevues"] = float(fixed_total)
+    forecast["depenses_variables_prevues"] = float(est_var)
+
+    forecast["net_prev"] = forecast["revenus_prevus"] - forecast["charges_fixes_prevues"] - forecast["depenses_variables_prevues"]
+
+    # Rolling solde sur prévisionnel depuis dernier solde réel
+    start_balance = float(summary["solde_fin"].iloc[-1]) if len(summary) else float(seed_initial)
+    forecast["solde_debut"] = 0.0
+    forecast["solde_fin"] = 0.0
+    running = start_balance
+    for i in range(len(forecast)):
+        forecast.loc[i, "solde_debut"] = running
+        running = running + float(forecast.loc[i, "net_prev"])
+        forecast.loc[i, "solde_fin"] = running
+
+    # =========================
+    # ---- REEL vs PREVU TABLE ---
+    # =========================
+    st.subheader("📅 Réel vs Prévisionnel (mensuel)")
+
+    real_view = summary.copy()
+    real_view = real_view.rename(columns={
+        "revenus": "revenus_prevus",
+        "charges_fixes": "charges_fixes_prevues",
+        "depenses_variables": "depenses_variables_prevues",
+        "net_mois": "net_prev",
+    })
+    real_view["type"] = "Réel"
+
+    forecast_view = forecast.copy()
+    forecast_view["type"] = "Prévisionnel"
+
+    rv = pd.concat(
+        [
+            real_view[["month","type","revenus_prevus","charges_fixes_prevues","depenses_variables_prevues","net_prev","solde_debut","solde_fin"]],
+            forecast_view[["month","type","revenus_prevus","charges_fixes_prevues","depenses_variables_prevues","net_prev","solde_debut","solde_fin"]],
+        ],
+        ignore_index=True
+    )
+
+    st.dataframe(rv, use_container_width=True, height=320)
+
+    # =========================
+    # ---- GRAPHIQUES EVOLUTION ---
+    # =========================
+    st.subheader("📈 Évolution du solde (réel + prévisionnel)")
+
+    chart_balance = alt.Chart(rv).mark_line(point=True).encode(
+        x=alt.X("month:O", title="Mois"),
+        y=alt.Y("solde_fin:Q", title="Solde fin (€)"),
+        color=alt.Color("type:N", title=""),
+        tooltip=[
+            alt.Tooltip("month:O", title="Mois"),
+            alt.Tooltip("type:N", title="Type"),
+            alt.Tooltip("solde_fin:Q", title="Solde fin", format=",.2f"),
+            alt.Tooltip("net_prev:Q", title="Net", format=",.2f"),
+        ]
+    ).properties(height=320)
+
+    st.altair_chart(chart_balance, use_container_width=True)
+
+    st.subheader("📊 Net mensuel (réel + prévisionnel)")
+    chart_net = alt.Chart(rv).mark_bar().encode(
+        x=alt.X("month:O", title="Mois"),
+        y=alt.Y("net_prev:Q", title="Net (€)"),
+        color=alt.condition(
+            alt.datum.net_prev < 0,
+            alt.value("#E63757"),
+            alt.value("#00D97E")
+        ),
+        tooltip=[
+            alt.Tooltip("month:O", title="Mois"),
+            alt.Tooltip("type:N", title="Type"),
+            alt.Tooltip("net_prev:Q", title="Net", format=",.2f"),
+        ]
+    ).properties(height=220)
+
+    st.altair_chart(chart_net, use_container_width=True)
+
+    # =========================
+    # ---- FILTRES + TABLE TRANSACTIONS ---
+    # =========================
+    st.divider()
+    st.subheader("📊 Filtres (transactions)")
+
+    colf1, colf2, colf3 = st.columns(3)
+    with colf1:
+        years = ["(Tous)"] + [str(y) for y in sorted(df["year"].dropna().unique())]
+        ypick = st.selectbox("Année", options=years, index=0)
+    with colf2:
+        months_all = ["(Tous)"] + sorted(df["month"].dropna().unique().tolist())
+        mpick = st.selectbox("Mois (AAAA-MM)", options=months_all, index=0)
+    with colf3:
+        cats_all = ["(Toutes)"] + sorted(df["category"].dropna().unique().tolist())
+        cpick = st.selectbox("Catégorie", options=cats_all, index=0)
+
+    dfv = df.copy()
+    if ypick != "(Tous)":
+        dfv = dfv[dfv["year"] == int(ypick)]
+    if mpick != "(Tous)":
+        dfv = dfv[dfv["month"] == mpick]
+    if cpick != "(Toutes)":
+        dfv = dfv[dfv["category"] == cpick]
+
+    st.subheader("🧾 Transactions (après catégorisation)")
+    st.dataframe(
+        dfv.sort_values(["date"], ascending=[False])[["date", "label", "category", "amount_signed"]],
+        use_container_width=True,
+        height=340
+    )
+
+    # =========================
+    # ---- EXPORTS ---
+    # =========================
+    st.subheader("📤 Exports")
+
+    def to_csv_bytes(df_: pd.DataFrame) -> bytes:
+        return df_.to_csv(index=False).encode("utf-8")
+
+    export_cols = ["date", "label", "category", "amount_signed", "year", "month"]
     st.download_button(
-        "⬇️ Télécharger la projection (JSON)",
-        data=json.dumps(projection_payload, indent=2).encode("utf-8"),
-        file_name=f"projection_{mois_choisi}.json",
-        mime="application/json"
+        "⬇️ Télécharger CSV (transactions filtrées)",
+        data=to_csv_bytes(dfv[export_cols]),
+        file_name=f"banque_filtre_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
     )
+
+    st.download_button(
+        "⬇️ Télécharger CSV (synthèse réel + prévisionnel)",
+        data=to_csv_bytes(rv),
+        file_name=f"budget_reel_prevu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+    with st.expander("🧩 Colonnes détectées / mapping", expanded=False):
+        st.json(colmap_dict, expanded=True)
+
+    # =========================
+    # ---- PARAMETRES AVANCES (EN BAS) ---
+    # =========================
+    st.divider()
+    with st.expander("⚙️ Paramètres avancés (catégories / fournisseurs / crédits) — à modifier si besoin", expanded=False):
+        st.caption("Les modifications sont sauvegardées et appliquées au prochain recalcul automatique (Streamlit relance le script).")
+
+        with st.form("advanced_params_form", clear_on_submit=False):
+            colA, colB = st.columns([1, 1])
+            with colA:
+                st.subheader("Patrons fournisseurs (fixes)")
+                providers_json_new = st.text_area(
+                    "Liste JSON de fournisseurs (Label/Regex)",
+                    value=st.session_state["providers_json"],
+                    height=220
+                )
+            with colB:
+                st.subheader("Crédits récurrents (entrées fixes)")
+                credits_json_new = st.text_area(
+                    "Liste JSON de crédits (label/amount)",
+                    value=st.session_state["credits_json"],
+                    height=220
+                )
+
+            st.subheader("Catégories variables (Regex)")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                pat_alim_new = st.text_area("Alimentation / Hypermarchés", value=st.session_state["pat_alim"], height=150)
+            with col2:
+                pat_anim_new = st.text_area("Animaux", value=st.session_state["pat_anim"], height=150)
+            with col3:
+                pat_carb_new = st.text_area("Carburant / Stations", value=st.session_state["pat_carb"], height=150)
+
+            pat_cash_new = st.text_area("Retraits espèces (DAB/ATM)", value=st.session_state["pat_cash"], height=110)
+
+            submitted = st.form_submit_button("💾 Enregistrer les paramètres")
+            if submitted:
+                st.session_state["providers_json"] = providers_json_new
+                st.session_state["credits_json"] = credits_json_new
+                st.session_state["pat_alim"] = pat_alim_new
+                st.session_state["pat_anim"] = pat_anim_new
+                st.session_state["pat_carb"] = pat_carb_new
+                st.session_state["pat_cash"] = pat_cash_new
+                st.success("Paramètres enregistrés ✅ (l'application se recalculera automatiquement).")
